@@ -2,3 +2,11 @@
 .Rhistory
 .RData
 .Ruserdata
+
+# Datos y resultados locales
+/data/
+/output/
+
+# Credenciales
+.Renviron
+.env

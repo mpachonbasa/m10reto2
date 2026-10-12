@@ -1,0 +1,1897 @@
+---
+title: "Auditoría del comportamiento del cliente y rediseño de la fidelización"
+subtitle: "Módulo 10 · Reto 2 · Grupo I"
+author: "Lourdes Casado Vidigal; Mónica Pachón Basallo; Pamela Valembois Madrigal"
+output:
+  pdf_document: default
+  html_document: default
+---
+```{r}
+# 01_revision_datos.R
+
+# 1. Paquetes
+for (paquete in c("readxl", "dplyr")) {
+  if (!requireNamespace(paquete, quietly = TRUE)) {
+    install.packages(paquete)
+  }
+}
+
+# 2. Archivos
+archivo_clientes <- "data/Maestro de Clientes.xlsx"
+archivo_tiques   <- "data/Maestro Tiquets Cliente.xlsx"
+
+stopifnot(
+  file.exists(archivo_clientes),
+  file.exists(archivo_tiques)
+)
+
+# 3. Importar los Excel completos
+clientes_originales <- readxl::read_excel(
+  archivo_clientes,
+  sheet = 1,
+  na = c("", "NA"),
+  trim_ws = TRUE,
+  guess_max = 10000
+)
+
+tiques_originales <- readxl::read_excel(
+  archivo_tiques,
+  sheet = 1,
+  na = c("", "NA"),
+  trim_ws = TRUE,
+  guess_max = 10000
+)
+
+# 4. Comprobar columnas y tipos antes de continuar
+columnas_clientes <- c(
+  "Id_cliente", "Pais", "Fecha_CaptacionCRM",
+  "Tienda_CaptacionCRM", "Genero", "Edad_actual"
+)
+
+columnas_tiques <- c(
+  "Id_cliente", "Origen_tiquet", "Id_tiquet",
+  "Fecha_tiquet", "Importe_tiquet", "Articulos_tiquet"
+)
+
+stopifnot(
+  all(columnas_clientes %in% names(clientes_originales)),
+  all(columnas_tiques %in% names(tiques_originales)),
+  inherits(clientes_originales$Fecha_CaptacionCRM, "POSIXt"),
+  inherits(tiques_originales$Fecha_tiquet, "POSIXt"),
+  is.numeric(clientes_originales$Edad_actual),
+  is.numeric(tiques_originales$Importe_tiquet),
+  is.numeric(tiques_originales$Articulos_tiquet)
+)
+
+clientes <- clientes_originales
+tiques <- tiques_originales
+
+# 5. Normalizar identificadores y textos
+normalizar_id <- function(x) {
+  resultado <- if (is.numeric(x)) {
+    format(x, scientific = FALSE, trim = TRUE, digits = 17)
+  } else {
+    trimws(as.character(x))
+  }
+
+  resultado[
+    is.na(x) | resultado == "" | resultado == "NA"
+  ] <- NA_character_
+
+  resultado
+}
+
+normalizar_texto <- function(x) {
+  resultado <- trimws(as.character(x))
+  resultado[
+    is.na(x) | resultado == "" | resultado == "NA"
+  ] <- NA_character_
+  resultado
+}
+
+clientes$Id_cliente <- normalizar_id(clientes$Id_cliente)
+tiques$Id_cliente <- normalizar_id(tiques$Id_cliente)
+tiques$Id_tiquet <- normalizar_id(tiques$Id_tiquet)
+
+for (columna in c("Pais", "Tienda_CaptacionCRM", "Genero")) {
+  clientes[[columna]] <- normalizar_texto(clientes[[columna]])
+}
+
+tiques$Origen_tiquet <- normalizar_texto(tiques$Origen_tiquet)
+
+# 6. Convertir las fechas de Excel a Date
+clientes$Fecha_CaptacionCRM <- as.Date(
+  clientes$Fecha_CaptacionCRM,
+  tz = "UTC"
+)
+
+tiques$Fecha_tiquet <- as.Date(
+  tiques$Fecha_tiquet,
+  tz = "UTC"
+)
+
+# 7. Dimensiones y valores ausentes
+cat("\nDIMENSIONES\n")
+print(data.frame(
+  tabla = c("clientes", "tiques"),
+  filas = c(nrow(clientes), nrow(tiques)),
+  columnas = c(ncol(clientes), ncol(tiques))
+))
+
+revisar_ausentes <- function(tabla) {
+  data.frame(
+    columna = names(tabla),
+    tipo = vapply(
+      tabla,
+      function(x) paste(class(x), collapse = "/"),
+      character(1)
+    ),
+    ausentes = vapply(
+      tabla,
+      function(x) sum(is.na(x)),
+      numeric(1)
+    ),
+    row.names = NULL
+  )
+}
+
+cat("\nAUSENTES EN CLIENTES\n")
+print(revisar_ausentes(clientes))
+
+cat("\nAUSENTES EN TIQUES\n")
+print(revisar_ausentes(tiques))
+
+# 8. Periodos
+rango_fechas <- function(x) {
+  if (all(is.na(x))) {
+    return(as.Date(c(NA_character_, NA_character_)))
+  }
+
+  range(x, na.rm = TRUE)
+}
+
+cat("\nPERIODO DE CAPTACIÓN\n")
+print(rango_fechas(clientes$Fecha_CaptacionCRM))
+
+cat("\nPERIODO DE TIQUES\n")
+print(rango_fechas(tiques$Fecha_tiquet))
+
+# 9. Duplicados y correspondencia entre tablas
+ids_clientes <- clientes$Id_cliente[
+  !is.na(clientes$Id_cliente)
+]
+
+ids_tiques <- tiques$Id_tiquet[
+  !is.na(tiques$Id_tiquet)
+]
+
+cat("\nDUPLICADOS Y CRUCE\n")
+print(c(
+  filas_clientes_duplicadas = sum(duplicated(clientes)),
+  filas_tiques_duplicadas = sum(duplicated(tiques)),
+  repeticiones_id_cliente = sum(duplicated(ids_clientes)),
+  repeticiones_id_tiquet = sum(duplicated(ids_tiques)),
+  tiques_sin_identificador_cliente = sum(
+    is.na(tiques$Id_cliente)
+  ),
+  tiques_sin_identificador_tiquet = sum(
+    is.na(tiques$Id_tiquet)
+  ),
+  tiques_con_id_no_presente_en_maestro = sum(
+    !is.na(tiques$Id_cliente) &
+      !(tiques$Id_cliente %in% ids_clientes)
+  )
+))
+
+# 10. Importes, artículos y edad
+cat("\nRESUMEN DE IMPORTES Y ARTÍCULOS\n")
+print(summary(
+  tiques[c("Importe_tiquet", "Articulos_tiquet")]
+))
+
+cat("\nRESUMEN DE EDAD\n")
+print(summary(clientes$Edad_actual))
+
+cat("\nOPERACIONES A REVISAR\n")
+print(c(
+  importes_negativos = sum(
+    tiques$Importe_tiquet < 0, na.rm = TRUE
+  ),
+  importes_cero = sum(
+    tiques$Importe_tiquet == 0, na.rm = TRUE
+  ),
+  articulos_negativos = sum(
+    tiques$Articulos_tiquet < 0, na.rm = TRUE
+  ),
+  articulos_cero = sum(
+    tiques$Articulos_tiquet == 0, na.rm = TRUE
+  ),
+  articulos_abs_mayores_100 = sum(
+    abs(tiques$Articulos_tiquet) > 100, na.rm = TRUE
+  )
+))
+
+# 11. Canales y género
+cat("\nCANALES\n")
+print(table(tiques$Origen_tiquet, useNA = "ifany"))
+
+cat("\nGÉNERO\n")
+print(table(clientes$Genero, useNA = "ifany"))
+
+# 12. Preparación conservadora del maestro
+clientes_sin_id <- clientes |>
+  dplyr::filter(is.na(Id_cliente))
+
+clientes_limpios <- clientes |>
+  dplyr::filter(!is.na(Id_cliente)) |>
+  dplyr::distinct()
+
+ids_conflictivos <- clientes_limpios |>
+  dplyr::count(Id_cliente, name = "n_filas") |>
+  dplyr::filter(n_filas > 1)
+
+clientes_conflictivos <- clientes_limpios |>
+  dplyr::filter(
+    Id_cliente %in% ids_conflictivos$Id_cliente
+  )
+
+cat("\nRESUMEN DE PREPARACIÓN DEL MAESTRO\n")
+print(c(
+  filas_originales = nrow(clientes),
+  filas_sin_id = nrow(clientes_sin_id),
+  filas_identificadas_tras_distinct = nrow(clientes_limpios),
+  ids_con_varias_filas = nrow(ids_conflictivos)
+))
+
+cat("\nEDADES A REVISAR\n")
+print(c(
+  sin_edad = sum(is.na(clientes_limpios$Edad_actual)),
+  edades_negativas = sum(
+    clientes_limpios$Edad_actual < 0, na.rm = TRUE
+  ),
+  edades_mayores_100 = sum(
+    clientes_limpios$Edad_actual > 100, na.rm = TRUE
+  ),
+  edades_no_enteras = sum(
+    clientes_limpios$Edad_actual !=
+      trunc(clientes_limpios$Edad_actual),
+    na.rm = TRUE
+  )
+))
+
+# 13. Marcar tiques sin eliminarlos
+tiques_revision <- tiques |>
+  dplyr::mutate(
+    cliente_en_maestro =
+      !is.na(Id_cliente) &
+      Id_cliente %in% clientes_limpios$Id_cliente,
+    importe_negativo = Importe_tiquet < 0,
+    importe_cero = Importe_tiquet == 0,
+    articulos_negativos = Articulos_tiquet < 0,
+    articulos_cero = Articulos_tiquet == 0,
+    articulos_pendientes_revision =
+      abs(Articulos_tiquet) > 100
+  )
+
+# 14. Percentiles de cantidades positivas
+cantidades <- tiques_revision |>
+  dplyr::filter(
+    Importe_tiquet > 0,
+    Articulos_tiquet > 0
+  ) |>
+  dplyr::pull(Articulos_tiquet)
+
+cat("\nPERCENTILES DE ARTÍCULOS\n")
+
+if (length(cantidades) > 0) {
+  print(quantile(
+    cantidades,
+    probs = c(0.5, 0.9, 0.95, 0.99, 0.999, 1)
+  ))
+} else {
+  cat("No hay operaciones con importe y artículos positivos.\n")
+}
+
+# 15. Mostrar las seis cantidades más extremas, sin identificadores
+posiciones <- head(
+  order(
+    abs(tiques$Articulos_tiquet),
+    decreasing = TRUE,
+    na.last = NA
+  ),
+  6
+)
+
+cat("\nCANTIDADES MÁS EXTREMAS\n")
+print(as.data.frame(
+  tiques[
+    posiciones,
+    c(
+      "Fecha_tiquet", "Origen_tiquet",
+      "Importe_tiquet", "Articulos_tiquet"
+    )
+  ]
+))
+```
+```{r}
+# 02_limpieza_datos.R
+
+
+# 2. Separar registros sin identificador
+clientes_sin_id <- clientes |>
+  dplyr::filter(is.na(Id_cliente))
+
+# Quitar solo duplicados exactos entre clientes identificados
+clientes_identificados <- clientes |>
+  dplyr::filter(!is.na(Id_cliente)) |>
+  dplyr::distinct()
+
+# 3. Detectar conflictos de identificador
+ids_conflictivos <- clientes_identificados |>
+  dplyr::count(Id_cliente, name = "n_filas") |>
+  dplyr::filter(n_filas > 1)
+
+clientes_conflictivos <- clientes_identificados |>
+  dplyr::filter(
+    Id_cliente %in% ids_conflictivos$Id_cliente
+  )
+
+# Verificar que los conflictos afectan solo a la fecha
+if (nrow(clientes_conflictivos) > 0) {
+  comprobacion_conflictos <- clientes_conflictivos |>
+    dplyr::group_by(Id_cliente) |>
+    dplyr::summarise(
+      campos_coinciden = (
+        dplyr::n_distinct(Pais) == 1 &
+        dplyr::n_distinct(Tienda_CaptacionCRM) == 1 &
+        dplyr::n_distinct(Genero) == 1 &
+        dplyr::n_distinct(Edad_actual) == 1
+      ),
+      fechas_completas = all(!is.na(Fecha_CaptacionCRM)),
+      .groups = "drop"
+    )
+
+  if (any(
+    !comprobacion_conflictos$campos_coinciden |
+      !comprobacion_conflictos$fechas_completas
+  )) {
+    stop("Hay conflictos que requieren revisión manual.")
+  }
+}
+
+# Conservar la primera fecha cuando el resto coincide
+clientes_base <- clientes_identificados |>
+  dplyr::mutate(
+    captacion_con_conflicto =
+      Id_cliente %in% ids_conflictivos$Id_cliente
+  ) |>
+  dplyr::arrange(Id_cliente, Fecha_CaptacionCRM) |>
+  dplyr::distinct(Id_cliente, .keep_all = TRUE)
+
+stopifnot(
+  !anyNA(clientes_base$Id_cliente),
+  !anyDuplicated(clientes_base$Id_cliente)
+)
+
+# 4. Edad: conservar el original y marcar incidencias
+clientes_base <- clientes_base |>
+  dplyr::mutate(
+    Edad_original = Edad_actual,
+    edad_negativa =
+      !is.na(Edad_original) & Edad_original < 0,
+    edad_mayor_100 =
+      !is.na(Edad_original) & Edad_original > 100,
+    Edad_actual = dplyr::if_else(
+      edad_negativa,
+      NA_real_,
+      Edad_original
+    )
+  )
+
+# 5. Tiques: conservar todas las operaciones
+tiques_base <- tiques |>
+  dplyr::mutate(
+    anio = as.integer(format(Fecha_tiquet, "%Y")),
+    mes = as.integer(format(Fecha_tiquet, "%m")),
+
+    cliente_en_maestro =
+      !is.na(Id_cliente) &
+      Id_cliente %in% clientes_base$Id_cliente,
+
+    importe_negativo = Importe_tiquet < 0,
+    importe_cero = Importe_tiquet == 0,
+    importe_positivo = Importe_tiquet > 0,
+
+    articulos_negativos = Articulos_tiquet < 0,
+    articulos_cero = Articulos_tiquet == 0,
+    articulos_pendientes_revision =
+      abs(Articulos_tiquet) > 100,
+
+    # Escenario exploratorio, no validación definitiva
+    incluido_upt_escenario_1_a_100 =
+      !is.na(Importe_tiquet) &
+      !is.na(Articulos_tiquet) &
+      Importe_tiquet > 0 &
+      Articulos_tiquet >= 1 &
+      Articulos_tiquet <= 100
+  )
+
+# 6. Cruce sin eliminar tiques ni multiplicar filas
+tiques_clientes <- tiques_base |>
+  dplyr::left_join(
+    clientes_base,
+    by = "Id_cliente",
+    relationship = "many-to-one",
+    na_matches = "never"
+  )
+
+stopifnot(nrow(tiques_clientes) == nrow(tiques))
+
+# 7. Resumen de control
+control_limpieza <- data.frame(
+  indicador = c(
+    "Filas originales de clientes",
+    "Filas de clientes sin identificador",
+    "Duplicados exactos eliminados entre identificados",
+    "Identificadores con conflicto",
+    "Clientes identificados únicos",
+    "Edades negativas convertidas a NA",
+    "Edades superiores a 100 marcadas",
+    "Tiques originales",
+    "Tiques después del cruce",
+    "Tiques sin identificador de cliente",
+    "Tiques con ID no presente en maestro",
+    "Tiques con cantidades extremas marcadas"
+  ),
+  valor = c(
+    nrow(clientes),
+    nrow(clientes_sin_id),
+    sum(!is.na(clientes$Id_cliente)) -
+      nrow(clientes_identificados),
+    nrow(ids_conflictivos),
+    nrow(clientes_base),
+    sum(clientes_base$edad_negativa),
+    sum(clientes_base$edad_mayor_100),
+    nrow(tiques),
+    nrow(tiques_clientes),
+    sum(is.na(tiques$Id_cliente)),
+    sum(
+      !is.na(tiques_base$Id_cliente) &
+        !tiques_base$cliente_en_maestro
+    ),
+    sum(
+      tiques_base$articulos_pendientes_revision,
+      na.rm = TRUE
+    )
+  )
+)
+
+cat("\nCONTROL FINAL DE LIMPIEZA\n")
+print(control_limpieza, row.names = FALSE)
+
+# 8. Guardar datos y registros de auditoría localmente
+dir.create(
+  "data/processed",
+  recursive = TRUE,
+  showWarnings = FALSE
+)
+
+saveRDS(
+  clientes_base,
+  "data/processed/clientes_base.rds"
+)
+
+saveRDS(
+  tiques_base,
+  "data/processed/tiques_base.rds"
+)
+
+saveRDS(
+  tiques_clientes,
+  "data/processed/tiques_clientes.rds"
+)
+
+saveRDS(
+  list(
+    clientes_sin_id = clientes_sin_id,
+    clientes_conflictivos = clientes_conflictivos,
+    cantidades_extremas = tiques_base |>
+      dplyr::filter(articulos_pendientes_revision),
+    control_limpieza = control_limpieza
+  ),
+  "data/processed/auditoria_limpieza.rds"
+)
+
+cat("\nLimpieza terminada y tablas guardadas.\n")
+```
+```{r}
+
+# 1. Comprobar que se ejecutó el chunk de limpieza
+stopifnot(
+  exists("tiques_base"),
+  exists("clientes_base"),
+  !anyDuplicated(clientes_base$Id_cliente)
+)
+
+# 2. Definir periodos de análisis
+periodos <- data.frame(
+  periodo = c(
+    "anual_2021",
+    "anual_2022",
+    "ene_may_2021",
+    "ene_may_2022",
+    "ene_may_2023",
+    "12m_mayo_2022",
+    "12m_mayo_2023"
+  ),
+  tipo = c(
+    "Anual", "Anual",
+    "Enero-mayo", "Enero-mayo", "Enero-mayo",
+    "12 meses", "12 meses"
+  ),
+  inicio = as.Date(c(
+    "2021-01-01",
+    "2022-01-01",
+    "2021-01-01",
+    "2022-01-01",
+    "2023-01-01",
+    "2021-06-01",
+    "2022-06-01"
+  )),
+  fin = as.Date(c(
+    "2021-12-31",
+    "2022-12-31",
+    "2021-05-31",
+    "2022-05-31",
+    "2023-05-31",
+    "2022-05-31",
+    "2023-05-31"
+  ))
+)
+
+# 3. Funciones auxiliares
+primera_fecha <- function(x) {
+  if (length(x) == 0 || all(is.na(x))) {
+    return(as.Date(NA_character_))
+  }
+  min(x, na.rm = TRUE)
+}
+
+ultima_fecha <- function(x) {
+  if (length(x) == 0 || all(is.na(x))) {
+    return(as.Date(NA_character_))
+  }
+  max(x, na.rm = TRUE)
+}
+
+# 4. Construir el resumen de cada periodo
+resumir_periodo <- function(i) {
+  datos <- tiques_base |>
+    dplyr::filter(
+      !is.na(Id_cliente),
+      Fecha_tiquet >= periodos$inicio[i],
+      Fecha_tiquet <= periodos$fin[i]
+    )
+
+  datos |>
+    dplyr::group_by(Id_cliente) |>
+    dplyr::summarise(
+      cliente_en_maestro = dplyr::first(cliente_en_maestro),
+
+      n_operaciones = dplyr::n(),
+
+      n_compras_positivas = sum(
+        Importe_tiquet > 0,
+        na.rm = TRUE
+      ),
+
+      n_operaciones_negativas = sum(
+        Importe_tiquet < 0,
+        na.rm = TRUE
+      ),
+
+      n_operaciones_cero = sum(
+        Importe_tiquet == 0,
+        na.rm = TRUE
+      ),
+
+      gasto_neto = sum(Importe_tiquet, na.rm = TRUE),
+
+      gasto_positivo = sum(
+        Importe_tiquet[Importe_tiquet > 0],
+        na.rm = TRUE
+      ),
+
+      primera_compra_periodo = primera_fecha(
+        Fecha_tiquet[Importe_tiquet > 0]
+      ),
+
+      ultima_compra_periodo = ultima_fecha(
+        Fecha_tiquet[Importe_tiquet > 0]
+      ),
+
+      n_tiques_upt_escenario = sum(
+        incluido_upt_escenario_1_a_100,
+        na.rm = TRUE
+      ),
+
+      articulos_upt_escenario = sum(
+        Articulos_tiquet[incluido_upt_escenario_1_a_100],
+        na.rm = TRUE
+      ),
+
+      n_operaciones_articulos_extremos = sum(
+        articulos_pendientes_revision,
+        na.rm = TRUE
+      ),
+
+      .groups = "drop"
+    ) |>
+    dplyr::mutate(
+      periodo = periodos$periodo[i],
+      tipo_periodo = periodos$tipo[i],
+      inicio_periodo = periodos$inicio[i],
+      fin_periodo = periodos$fin[i],
+
+      comprador_observado = n_compras_positivas > 0,
+
+      ticket_medio_positivo = dplyr::if_else(
+        n_compras_positivas > 0,
+        gasto_positivo / n_compras_positivas,
+        NA_real_
+      ),
+
+      upt_escenario_1_a_100 = dplyr::if_else(
+        n_tiques_upt_escenario > 0,
+        articulos_upt_escenario / n_tiques_upt_escenario,
+        NA_real_
+      ),
+
+      dias_desde_ultima_compra = as.integer(
+        fin_periodo - ultima_compra_periodo
+      )
+    )
+}
+
+cliente_periodo <- dplyr::bind_rows(
+  lapply(seq_len(nrow(periodos)), resumir_periodo)
+)
+
+# 5. Verificar una fila por cliente y periodo
+stopifnot(
+  !anyDuplicated(
+    cliente_periodo[c("Id_cliente", "periodo")]
+  )
+)
+
+# 6. Control agregado, sin mostrar identificadores
+control_periodos <- cliente_periodo |>
+  dplyr::group_by(
+    periodo, tipo_periodo, inicio_periodo, fin_periodo
+  ) |>
+  dplyr::summarise(
+    clientes_con_operaciones = dplyr::n(),
+    compradores_observados = sum(comprador_observado),
+    compradores_presentes_en_maestro = sum(
+      comprador_observado & cliente_en_maestro
+    ),
+    operaciones_con_cliente_identificado = sum(n_operaciones),
+    compras_positivas = sum(n_compras_positivas),
+    gasto_neto = sum(gasto_neto),
+    gasto_positivo = sum(gasto_positivo),
+    .groups = "drop"
+  )
+
+print(as.data.frame(control_periodos), row.names = FALSE)
+
+# 7. Guardar la tabla localmente
+dir.create(
+  "data/processed",
+  recursive = TRUE,
+  showWarnings = FALSE
+)
+
+saveRDS(
+  cliente_periodo,
+  "data/processed/cliente_periodo.rds"
+)
+```
+```{r cuadro-kpi}
+
+# 1. División segura
+dividir <- function(numerador, denominador) {
+  ifelse(
+    is.na(denominador) | denominador == 0,
+    NA_real_,
+    numerador / denominador
+  )
+}
+
+# 2. KPI de cada periodo
+calcular_kpi <- function(i) {
+  operaciones <- tiques_base |>
+    dplyr::filter(
+      Fecha_tiquet >= periodos$inicio[i],
+      Fecha_tiquet <= periodos$fin[i]
+    )
+
+  compradores <- cliente_periodo |>
+    dplyr::filter(
+      periodo == periodos$periodo[i],
+      comprador_observado
+    )
+
+  positivas <- operaciones |>
+    dplyr::filter(Importe_tiquet > 0)
+
+  escenario_upt <- positivas |>
+    dplyr::filter(incluido_upt_escenario_1_a_100)
+
+  n_compradores <- nrow(compradores)
+
+  data.frame(
+    periodo = periodos$periodo[i],
+    tipo_periodo = periodos$tipo[i],
+    inicio = periodos$inicio[i],
+    fin = periodos$fin[i],
+
+    operaciones_totales = nrow(operaciones),
+    operaciones_positivas = nrow(positivas),
+
+    compradores_identificados = n_compradores,
+    compradores_en_maestro = sum(
+      compradores$cliente_en_maestro
+    ),
+
+    gasto_neto_total = sum(
+      operaciones$Importe_tiquet,
+      na.rm = TRUE
+    ),
+
+    gasto_positivo_total = sum(
+      positivas$Importe_tiquet,
+      na.rm = TRUE
+    ),
+
+    frecuencia_media = dividir(
+      sum(compradores$n_compras_positivas),
+      n_compradores
+    ),
+
+    gasto_positivo_por_comprador = dividir(
+      sum(compradores$gasto_positivo),
+      n_compradores
+    ),
+
+    ticket_medio_positivo = dividir(
+      sum(positivas$Importe_tiquet, na.rm = TRUE),
+      nrow(positivas)
+    ),
+
+    porcentaje_compradores_con_repeticion = 100 * dividir(
+      sum(compradores$n_compras_positivas >= 2),
+      n_compradores
+    ),
+
+    upt_escenario_1_a_100 = dividir(
+      sum(escenario_upt$Articulos_tiquet, na.rm = TRUE),
+      nrow(escenario_upt)
+    ),
+
+    tiques_incluidos_upt_escenario = nrow(escenario_upt),
+
+    porcentaje_tiques_positivos_fuera_upt = 100 * dividir(
+      nrow(positivas) - nrow(escenario_upt),
+      nrow(positivas)
+    )
+  )
+}
+
+kpi_periodos <- dplyr::bind_rows(
+  lapply(seq_len(nrow(periodos)), calcular_kpi)
+)
+
+# 3. Comparativas: cada periodo contra el anterior de su mismo tipo
+indicadores <- c(
+  "compradores_identificados",
+  "gasto_neto_total",
+  "gasto_positivo_total",
+  "frecuencia_media",
+  "gasto_positivo_por_comprador",
+  "ticket_medio_positivo",
+  "upt_escenario_1_a_100"
+)
+
+comparativas_kpi <- dplyr::bind_rows(
+  lapply(indicadores, function(indicador) {
+    kpi_periodos |>
+      dplyr::transmute(
+        periodo,
+        tipo_periodo,
+        fin,
+        indicador = indicador,
+        valor = .data[[indicador]]
+      ) |>
+      dplyr::group_by(tipo_periodo) |>
+      dplyr::arrange(fin, .by_group = TRUE) |>
+      dplyr::mutate(
+        periodo_referencia = dplyr::lag(periodo),
+        valor_referencia = dplyr::lag(valor),
+        diferencia = valor - valor_referencia,
+        variacion_porcentual = 100 * dividir(
+          diferencia,
+          valor_referencia
+        )
+      ) |>
+      dplyr::ungroup()
+  })
+)
+
+# 4. Mostrar tablas redondeadas, sin alterar las originales
+cat("\nKPI POR PERIODO\n")
+print(
+  as.data.frame(
+    kpi_periodos |>
+      dplyr::mutate(
+        dplyr::across(
+          where(is.numeric),
+          ~ round(.x, 3)
+        )
+      )
+  ),
+  row.names = FALSE
+)
+
+cat("\nCOMPARACIONES CON REFERENCIA DISPONIBLE\n")
+print(
+  as.data.frame(
+    comparativas_kpi |>
+      dplyr::filter(!is.na(periodo_referencia)) |>
+      dplyr::mutate(
+        dplyr::across(
+          c(valor, valor_referencia, diferencia, variacion_porcentual),
+          ~ round(.x, 3)
+        )
+      )
+  ),
+  row.names = FALSE
+)
+
+# 5. Guardar resultados localmente
+saveRDS(
+  kpi_periodos,
+  "data/processed/kpi_periodos.rds"
+)
+
+saveRDS(
+  comparativas_kpi,
+  "data/processed/comparativas_kpi.rds"
+)
+```
+```{r recurrencia entre periodos}
+
+# 1. Comparaciones equivalentes
+pares_periodos <- data.frame(
+  referencia = c(
+    "anual_2021",
+    "ene_may_2021",
+    "ene_may_2022",
+    "12m_mayo_2022"
+  ),
+  actual = c(
+    "anual_2022",
+    "ene_may_2022",
+    "ene_may_2023",
+    "12m_mayo_2023"
+  )
+)
+
+# 2. Comparar compradores identificados
+calcular_recurrencia <- function(i) {
+  referencia <- pares_periodos$referencia[i]
+  actual <- pares_periodos$actual[i]
+
+  compradores_ref <- cliente_periodo |>
+    dplyr::filter(
+      periodo == referencia,
+      comprador_observado
+    ) |>
+    dplyr::pull(Id_cliente)
+
+  compradores_act <- cliente_periodo |>
+    dplyr::filter(
+      periodo == actual,
+      comprador_observado
+    ) |>
+    dplyr::pull(Id_cliente)
+
+  recurrentes <- intersect(compradores_ref, compradores_act)
+
+  sin_compra_actual <- setdiff(
+    compradores_ref,
+    compradores_act
+  )
+
+  solo_actual <- setdiff(
+    compradores_act,
+    compradores_ref
+  )
+
+  data.frame(
+    periodo_referencia = referencia,
+    periodo_actual = actual,
+
+    compradores_referencia = length(compradores_ref),
+    compradores_actuales = length(compradores_act),
+
+    compradores_en_ambos = length(recurrentes),
+    compradores_ref_sin_compra_actual =
+      length(sin_compra_actual),
+    compradores_actuales_sin_compra_ref =
+      length(solo_actual),
+
+    recurrencia_porcentaje = dividir(
+      100 * length(recurrentes),
+      length(compradores_ref)
+    ),
+
+    porcentaje_actuales_que_ya_compraban = dividir(
+      100 * length(recurrentes),
+      length(compradores_act)
+    )
+  )
+}
+
+recurrencia_periodos <- dplyr::bind_rows(
+  lapply(
+    seq_len(nrow(pares_periodos)),
+    calcular_recurrencia
+  )
+)
+
+# 3. Controles de consistencia
+stopifnot(
+  all(
+    recurrencia_periodos$compradores_en_ambos +
+      recurrencia_periodos$compradores_ref_sin_compra_actual ==
+      recurrencia_periodos$compradores_referencia
+  ),
+  all(
+    recurrencia_periodos$compradores_en_ambos +
+      recurrencia_periodos$compradores_actuales_sin_compra_ref ==
+      recurrencia_periodos$compradores_actuales
+  )
+)
+
+# 4. Mostrar resultados
+cat("\nRECURRENCIA ENTRE PERIODOS\n")
+
+print(
+  as.data.frame(
+    recurrencia_periodos |>
+      dplyr::mutate(
+        dplyr::across(
+          c(
+            recurrencia_porcentaje,
+            porcentaje_actuales_que_ya_compraban
+          ),
+          ~ round(.x, 2)
+        )
+      )
+  ),
+  row.names = FALSE
+)
+
+# 5. Guardar
+saveRDS(
+  recurrencia_periodos,
+  "data/processed/recurrencia_periodos.rds"
+)
+```
+```{r matriz frecuencia recurrencia}
+
+# 1. Comprobar tablas necesarias
+stopifnot(
+  exists("cliente_periodo"),
+  exists("clientes_base")
+)
+
+# 2. Compradores de las dos ventanas de 12 meses
+compradores_actuales <- cliente_periodo |>
+  dplyr::filter(
+    periodo == "12m_mayo_2023",
+    comprador_observado
+  )
+
+compradores_anteriores <- cliente_periodo |>
+  dplyr::filter(
+    periodo == "12m_mayo_2022",
+    comprador_observado
+  )
+
+ids_anteriores <- compradores_anteriores$Id_cliente
+
+# 3. Clasificar compradores recientes
+matriz_clientes <- compradores_actuales |>
+  dplyr::mutate(
+    recurrencia_observada = Id_cliente %in% ids_anteriores,
+
+    frecuencia_grupo = dplyr::if_else(
+      n_compras_positivas == 1,
+      "Una compra",
+      "Dos o más compras"
+    ),
+
+    recurrencia_grupo = dplyr::if_else(
+      recurrencia_observada,
+      "Compra en ambas ventanas",
+      "Sin compra en la ventana anterior"
+    ),
+
+    segmento = dplyr::case_when(
+      n_compras_positivas == 1 & !recurrencia_observada ~
+        "A: una compra, sin continuidad observada",
+
+      n_compras_positivas >= 2 & !recurrencia_observada ~
+        "B: varias compras, sin continuidad observada",
+
+      n_compras_positivas == 1 & recurrencia_observada ~
+        "C: una compra, con continuidad",
+
+      n_compras_positivas >= 2 & recurrencia_observada ~
+        "D: varias compras, con continuidad"
+    )
+  )
+
+# 4. Resumir comportamiento y valor observado por segmento
+matriz_resumen <- matriz_clientes |>
+  dplyr::group_by(
+    segmento,
+    frecuencia_grupo,
+    recurrencia_grupo
+  ) |>
+  dplyr::summarise(
+    clientes = dplyr::n(),
+    clientes_en_maestro = sum(cliente_en_maestro),
+
+    compras_positivas = sum(n_compras_positivas),
+
+    gasto_positivo_total = sum(gasto_positivo),
+    gasto_neto_total = sum(gasto_neto),
+
+    frecuencia_media = mean(n_compras_positivas),
+
+    gasto_positivo_medio_12m = mean(gasto_positivo),
+    gasto_neto_medio_12m = mean(gasto_neto),
+    gasto_neto_mediano_12m = median(gasto_neto),
+
+    percentil_25_gasto_neto = as.numeric(
+      quantile(gasto_neto, 0.25)
+    ),
+
+    percentil_75_gasto_neto = as.numeric(
+      quantile(gasto_neto, 0.75)
+    ),
+
+    ticket_medio_positivo =
+      sum(gasto_positivo) / sum(n_compras_positivas),
+
+    clientes_con_gasto_neto_negativo = sum(gasto_neto < 0),
+
+    .groups = "drop"
+  ) |>
+  dplyr::mutate(
+    porcentaje_clientes =
+      100 * clientes / sum(clientes),
+
+    porcentaje_gasto_positivo =
+      100 * gasto_positivo_total / sum(gasto_positivo_total)
+  )
+
+# 5. Compradores anteriores sin compra positiva reciente
+compradores_sin_compra_reciente <- compradores_anteriores |>
+  dplyr::filter(
+    !(Id_cliente %in% compradores_actuales$Id_cliente)
+  )
+
+control_matriz <- data.frame(
+  indicador = c(
+    "Compradores de los 12 meses recientes",
+    "Compradores recientes con compra en la ventana anterior",
+    "Compradores recientes sin compra en la ventana anterior",
+    "Compradores anteriores sin compra positiva reciente"
+  ),
+  valor = c(
+    nrow(matriz_clientes),
+    sum(matriz_clientes$recurrencia_observada),
+    sum(!matriz_clientes$recurrencia_observada),
+    nrow(compradores_sin_compra_reciente)
+  )
+)
+
+# 6. Comprobar consistencia
+stopifnot(
+  !anyDuplicated(matriz_clientes$Id_cliente),
+
+  sum(matriz_resumen$clientes) ==
+    nrow(compradores_actuales),
+
+  sum(matriz_clientes$recurrencia_observada) +
+    nrow(compradores_sin_compra_reciente) ==
+    nrow(compradores_anteriores)
+)
+
+# 7. Mostrar tablas compactas
+cat("\nCONTROL DE LA MATRIZ\n")
+print(control_matriz, row.names = FALSE)
+
+cat("\nMATRIZ: TAMAÑO Y COMPORTAMIENTO\n")
+print(
+  as.data.frame(
+    matriz_resumen |>
+      dplyr::select(
+        segmento,
+        clientes,
+        porcentaje_clientes,
+        porcentaje_gasto_positivo,
+        frecuencia_media,
+        ticket_medio_positivo
+      ) |>
+      dplyr::mutate(
+        dplyr::across(
+          where(is.numeric),
+          ~ round(.x, 2)
+        )
+      )
+  ),
+  row.names = FALSE
+)
+
+cat("\nVALOR OBSERVADO A 12 MESES POR SEGMENTO\n")
+print(
+  as.data.frame(
+    matriz_resumen |>
+      dplyr::select(
+        segmento,
+        gasto_positivo_medio_12m,
+        gasto_neto_medio_12m,
+        gasto_neto_mediano_12m,
+        percentil_25_gasto_neto,
+        percentil_75_gasto_neto,
+        clientes_con_gasto_neto_negativo
+      ) |>
+      dplyr::mutate(
+        dplyr::across(
+          where(is.numeric),
+          ~ round(.x, 2)
+        )
+      )
+  ),
+  row.names = FALSE
+)
+
+# 8. Guardar resultados locales
+dir.create(
+  "data/processed",
+  recursive = TRUE,
+  showWarnings = FALSE
+)
+
+saveRDS(
+  matriz_clientes,
+  "data/processed/matriz_clientes.rds"
+)
+
+saveRDS(
+  matriz_resumen,
+  "data/processed/matriz_resumen.rds"
+)
+
+saveRDS(
+  compradores_sin_compra_reciente,
+  "data/processed/compradores_sin_compra_reciente.rds"
+)
+```
+```{r actividad-clientes}
+# 1. Comprobar datos necesarios
+stopifnot(
+  exists("clientes_base"),
+  exists("tiques_base"),
+  !anyDuplicated(clientes_base$Id_cliente)
+)
+
+inicio_historico <- as.Date("2021-01-01")
+
+# 2. Construir la situación de los clientes en una fecha de corte
+calcular_actividad <- function(corte, inicio_12m) {
+
+  # Compras positivas observadas hasta el corte
+  historial <- tiques_base |>
+    dplyr::filter(
+      !is.na(Id_cliente),
+      Importe_tiquet > 0,
+      Fecha_tiquet <= corte
+    ) |>
+    dplyr::group_by(Id_cliente) |>
+    dplyr::summarise(
+      primera_compra_observada = min(Fecha_tiquet),
+      ultima_compra_observada = max(Fecha_tiquet),
+      compras_observadas = dplyr::n(),
+      .groups = "drop"
+    )
+
+  # Mantener todo el maestro y todos los compradores identificados
+  base <- clientes_base |>
+    dplyr::select(Id_cliente, Fecha_CaptacionCRM) |>
+    dplyr::mutate(en_maestro = TRUE) |>
+    dplyr::full_join(
+      historial,
+      by = "Id_cliente",
+      relationship = "one-to-one",
+      na_matches = "never"
+    ) |>
+    dplyr::mutate(
+      en_maestro = dplyr::coalesce(en_maestro, FALSE),
+
+      compra_observada_hasta_corte =
+        !is.na(ultima_compra_observada),
+
+      activo_12m =
+        !is.na(ultima_compra_observada) &
+        ultima_compra_observada >= inicio_12m,
+
+      dias_desde_ultima_compra = as.integer(
+        corte - ultima_compra_observada
+      ),
+
+      # Fecha de captación del maestro actual:
+      # no equivale a una fotografía histórica del CRM.
+      situacion_captacion = dplyr::case_when(
+        !en_maestro ~ "Comprador fuera del maestro",
+        is.na(Fecha_CaptacionCRM) ~ "Captacion desconocida",
+        Fecha_CaptacionCRM <= corte ~ "Captacion hasta el corte",
+        TRUE ~ "Captacion posterior al corte"
+      ),
+
+      compra_anterior_captacion =
+        !is.na(primera_compra_observada) &
+        !is.na(Fecha_CaptacionCRM) &
+        primera_compra_observada < Fecha_CaptacionCRM,
+
+      fecha_corte = corte
+    )
+
+  base
+}
+
+actividad_2022 <- calcular_actividad(
+  corte = as.Date("2022-05-31"),
+  inicio_12m = as.Date("2021-06-01")
+)
+
+actividad_2023 <- calcular_actividad(
+  corte = as.Date("2023-05-31"),
+  inicio_12m = as.Date("2022-06-01")
+)
+
+# 3. Añadir ventana completa de 24 meses solo al corte de 2023
+actividad_2023 <- actividad_2023 |>
+  dplyr::mutate(
+    comprador_24m =
+      !is.na(ultima_compra_observada) &
+      ultima_compra_observada >= as.Date("2021-06-01"),
+
+    comprador_24m_sin_compra_12m =
+      comprador_24m & !activo_12m
+  )
+# 4. Resumen de actividad a 12 meses
+resumir_actividad <- function(base) {
+  data.frame(
+    fecha_corte = base$fecha_corte[1],
+
+    activos_identificados_12m = sum(base$activo_12m),
+
+    activos_12m_presentes_maestro = sum(
+      base$activo_12m & base$en_maestro
+    ),
+
+    activos_12m_fuera_maestro = sum(
+      base$activo_12m & !base$en_maestro
+    ),
+
+    activos_12m_captacion_posterior = sum(
+      base$activo_12m &
+        base$situacion_captacion == "Captacion posterior al corte"
+    ),
+
+    registros_captados_hasta_corte = sum(
+      base$situacion_captacion == "Captacion hasta el corte"
+    ),
+
+    registros_fecha_captacion_desconocida = sum(
+      base$situacion_captacion == "Captacion desconocida"
+    ),
+
+    registros_captados_sin_compra_observada = sum(
+      base$situacion_captacion == "Captacion hasta el corte" &
+        !base$compra_observada_hasta_corte
+    ),
+
+    compradores_con_compra_anterior_captacion = sum(
+      base$compra_anterior_captacion
+    )
+  )
+}
+
+resumen_actividad <- dplyr::bind_rows(
+  resumir_actividad(actividad_2022),
+  resumir_actividad(actividad_2023)
+) |>
+  dplyr::arrange(fecha_corte) |>
+  dplyr::mutate(
+    referencia_activos = dplyr::lag(activos_identificados_12m),
+
+    variacion_activos_porcentaje = 100 * dividir(
+      activos_identificados_12m - referencia_activos,
+      referencia_activos
+    )
+  )
+
+# 5. Resumen de compradores a 24 meses
+resumen_24m <- data.frame(
+  fecha_corte = as.Date("2023-05-31"),
+  inicio_ventana = as.Date("2021-06-01"),
+
+  compradores_identificados_24m = sum(
+    actividad_2023$comprador_24m
+  ),
+
+  compradores_24m_presentes_maestro = sum(
+    actividad_2023$comprador_24m &
+      actividad_2023$en_maestro
+  ),
+
+  activos_12m = sum(actividad_2023$activo_12m),
+
+  compradores_24m_sin_compra_12m = sum(
+    actividad_2023$comprador_24m_sin_compra_12m
+  ),
+
+  porcentaje_activos_entre_compradores_24m = 100 * dividir(
+    sum(actividad_2023$activo_12m),
+    sum(actividad_2023$comprador_24m)
+  )
+)
+
+# 6. Comprobar coherencia con resultados anteriores
+stopifnot(
+  sum(actividad_2022$activo_12m) ==
+    sum(
+      cliente_periodo$comprador_observado[
+        cliente_periodo$periodo == "12m_mayo_2022"
+      ]
+    ),
+
+  sum(actividad_2023$activo_12m) ==
+    sum(
+      cliente_periodo$comprador_observado[
+        cliente_periodo$periodo == "12m_mayo_2023"
+      ]
+    ),
+
+  sum(actividad_2023$comprador_24m) ==
+    sum(actividad_2023$activo_12m) +
+    sum(actividad_2023$comprador_24m_sin_compra_12m)
+)
+
+# 7. Mostrar resultados agregados
+cat("\nACTIVIDAD A 12 MESES Y CONTROL DEL MAESTRO\n")
+
+print(
+  as.data.frame(
+    resumen_actividad |>
+      dplyr::mutate(
+        variacion_activos_porcentaje =
+          round(variacion_activos_porcentaje, 2)
+      )
+  ),
+  row.names = FALSE
+)
+
+cat("\nCOMPRADORES OBSERVADOS A 24 MESES\n")
+
+print(
+  as.data.frame(
+    resumen_24m |>
+      dplyr::mutate(
+        porcentaje_activos_entre_compradores_24m =
+          round(porcentaje_activos_entre_compradores_24m, 2)
+      )
+  ),
+  row.names = FALSE
+)
+
+# 8. Guardar tablas locales
+saveRDS(
+  actividad_2022,
+  "data/processed/actividad_2022.rds"
+)
+
+saveRDS(
+  actividad_2023,
+  "data/processed/actividad_2023.rds"
+)
+
+saveRDS(
+  resumen_actividad,
+  "data/processed/resumen_actividad.rds"
+)
+
+saveRDS(
+  resumen_24m,
+  "data/processed/resumen_24m.rds"
+)
+```
+
+```{r escenarios-coste-vinculacion}
+# 1. Comprobar la matriz disponible
+stopifnot(
+  exists("matriz_clientes"),
+  !anyDuplicated(matriz_clientes$Id_cliente)
+)
+
+# 2. Parámetros ilustrativos: no son datos de la empresa
+escenarios <- data.frame(
+  escenario = c("Bajo", "Intermedio", "Alto"),
+  margen_supuesto = c(0.30, 0.40, 0.50),
+  fraccion_margen_recompensas = c(0.10, 0.15, 0.20)
+)
+
+escenarios$coste_sobre_gasto_neto <-
+  escenarios$margen_supuesto *
+  escenarios$fraccion_margen_recompensas
+
+# 3. Base económica por segmento
+# Se conservan los gastos netos negativos:
+# no se convierten en cero para inflar el presupuesto agregado.
+base_presupuesto <- matriz_clientes |>
+  dplyr::group_by(segmento) |>
+  dplyr::summarise(
+    clientes = dplyr::n(),
+    clientes_en_maestro = sum(cliente_en_maestro),
+
+    gasto_neto_12m = sum(gasto_neto),
+    gasto_neto_medio_12m = mean(gasto_neto),
+    gasto_neto_mediano_12m = median(gasto_neto),
+
+    gasto_neto_12m_en_maestro = sum(
+      gasto_neto[cliente_en_maestro]
+    ),
+
+    clientes_gasto_neto_negativo = sum(gasto_neto < 0),
+
+    .groups = "drop"
+  )
+
+# 4. Aplicar cada escenario
+presupuesto_segmentos <- dplyr::bind_rows(
+  lapply(seq_len(nrow(escenarios)), function(i) {
+    base_presupuesto |>
+      dplyr::mutate(
+        escenario = escenarios$escenario[i],
+        margen_supuesto = escenarios$margen_supuesto[i],
+
+        fraccion_margen_recompensas =
+          escenarios$fraccion_margen_recompensas[i],
+
+        coste_sobre_gasto_neto =
+          escenarios$coste_sobre_gasto_neto[i],
+
+        margen_estimado_segmento =
+          gasto_neto_12m * margen_supuesto,
+
+        presupuesto_recompensas_segmento =
+          margen_estimado_segmento *
+          fraccion_margen_recompensas,
+
+        presupuesto_medio_por_comprador =
+          presupuesto_recompensas_segmento / clientes,
+
+        presupuesto_recompensas_en_maestro =
+          gasto_neto_12m_en_maestro *
+          coste_sobre_gasto_neto
+      )
+  })
+)
+
+# 5. Totales por escenario
+presupuesto_total <- presupuesto_segmentos |>
+  dplyr::group_by(
+    escenario,
+    margen_supuesto,
+    fraccion_margen_recompensas,
+    coste_sobre_gasto_neto
+  ) |>
+  dplyr::summarise(
+    compradores = sum(clientes),
+    compradores_en_maestro = sum(clientes_en_maestro),
+
+    gasto_neto_base = sum(gasto_neto_12m),
+    margen_estimado = sum(margen_estimado_segmento),
+
+    presupuesto_recompensas = sum(
+      presupuesto_recompensas_segmento
+    ),
+
+    presupuesto_recompensas_en_maestro = sum(
+      presupuesto_recompensas_en_maestro
+    ),
+
+    presupuesto_medio_por_comprador =
+      presupuesto_recompensas / compradores,
+
+    .groups = "drop"
+  )
+
+# 6. Control: misma base de compradores en cada escenario
+stopifnot(
+  all(
+    presupuesto_total$compradores ==
+      nrow(matriz_clientes)
+  )
+)
+
+# 7. Mostrar los supuestos
+cat("\nSUPUESTOS DE LOS ESCENARIOS\n")
+print(escenarios, row.names = FALSE)
+
+cat("\nPRESUPUESTO TOTAL POR ESCENARIO\n")
+print(
+  as.data.frame(
+    presupuesto_total |>
+      dplyr::mutate(
+        dplyr::across(
+          where(is.numeric),
+          ~ round(.x, 2)
+        )
+      )
+  ),
+  row.names = FALSE
+)
+
+cat("\nPRESUPUESTO POR SEGMENTO: ESCENARIO INTERMEDIO\n")
+print(
+  as.data.frame(
+    presupuesto_segmentos |>
+      dplyr::filter(escenario == "Intermedio") |>
+      dplyr::select(
+        segmento,
+        clientes,
+        gasto_neto_medio_12m,
+        gasto_neto_mediano_12m,
+        presupuesto_recompensas_segmento,
+        presupuesto_medio_por_comprador,
+        presupuesto_recompensas_en_maestro,
+        clientes_gasto_neto_negativo
+      ) |>
+      dplyr::mutate(
+        dplyr::across(
+          where(is.numeric),
+          ~ round(.x, 2)
+        )
+      )
+  ),
+  row.names = FALSE
+)
+
+# 8. Guardar resultados locales
+saveRDS(
+  escenarios,
+  "data/processed/supuestos_recompensas.rds"
+)
+
+saveRDS(
+  presupuesto_segmentos,
+  "data/processed/presupuesto_segmentos.rds"
+)
+
+saveRDS(
+  presupuesto_total,
+  "data/processed/presupuesto_total.rds"
+)
+```
+```{r comprobar-fechas-matriz}
+stopifnot(exists("matriz_clientes"))
+
+cat("\nCOLUMNAS DE MATRIZ_CLIENTES\n")
+print(names(matriz_clientes))
+
+columnas_temporales <- names(matriz_clientes)[
+  grepl(
+    "fecha|date|primera|ultima|última|recencia|antig",
+    names(matriz_clientes),
+    ignore.case = TRUE
+  ) |
+    vapply(
+      matriz_clientes,
+      function(x) inherits(x, c("Date", "POSIXt")),
+      logical(1)
+    )
+]
+
+cat("\nESTRUCTURA DE LAS POSIBLES VARIABLES TEMPORALES\n")
+
+if (length(columnas_temporales) > 0) {
+  str(
+    as.data.frame(
+      matriz_clientes[, columnas_temporales, drop = FALSE]
+    )
+  )
+
+  cat("\nRESUMEN DE LAS POSIBLES VARIABLES TEMPORALES\n")
+  print(
+    summary(
+      as.data.frame(
+        matriz_clientes[, columnas_temporales, drop = FALSE]
+      )
+    )
+  )
+} else {
+  cat("No se han encontrado variables temporales en la matriz.\n")
+}
+```
+```{r control-tiempo-repeticion}
+# 1. Comprobar fechas, población y orden temporal
+stopifnot(
+  !anyDuplicated(matriz_clientes$Id_cliente),
+  all(!is.na(matriz_clientes$primera_compra_periodo)),
+  all(!is.na(matriz_clientes$ultima_compra_periodo)),
+  all(!is.na(matriz_clientes$inicio_periodo)),
+  all(!is.na(matriz_clientes$fin_periodo)),
+  all(
+    matriz_clientes$primera_compra_periodo >=
+      matriz_clientes$inicio_periodo
+  ),
+  all(
+    matriz_clientes$ultima_compra_periodo >=
+      matriz_clientes$primera_compra_periodo
+  ),
+  all(
+    matriz_clientes$ultima_compra_periodo <=
+      matriz_clientes$fin_periodo
+  )
+)
+
+# 2. Añadir variables sin modificar la matriz original
+bandas_dias <- c(
+  "0-30 días",
+  "31-90 días",
+  "91-180 días",
+  "Más de 180 días"
+)
+
+matriz_temporal <- matriz_clientes |>
+  dplyr::mutate(
+    dias_observacion_desde_primera = as.integer(
+      fin_periodo - primera_compra_periodo
+    ),
+
+    recencia_dias_control = as.integer(
+      fin_periodo - ultima_compra_periodo
+    ),
+
+    banda_tiempo_disponible = cut(
+      dias_observacion_desde_primera,
+      breaks = c(-Inf, 30, 90, 180, Inf),
+      labels = bandas_dias,
+      right = TRUE,
+      ordered_result = TRUE
+    ),
+
+    banda_recencia = cut(
+      recencia_dias_control,
+      breaks = c(-Inf, 30, 90, 180, Inf),
+      labels = bandas_dias,
+      right = TRUE,
+      ordered_result = TRUE
+    )
+  )
+
+# 3. Validar la recencia ya calculada
+stopifnot(
+  all(!is.na(matriz_temporal$dias_desde_ultima_compra)),
+  all(
+    matriz_temporal$recencia_dias_control ==
+      matriz_temporal$dias_desde_ultima_compra
+  ),
+  nrow(matriz_temporal) == nrow(matriz_clientes)
+)
+
+# 4. Distribución del tiempo disponible por segmento
+tiempo_por_segmento <- matriz_temporal |>
+  dplyr::count(
+    segmento,
+    banda_tiempo_disponible,
+    name = "clientes",
+    .drop = FALSE
+  ) |>
+  dplyr::group_by(segmento) |>
+  dplyr::mutate(
+    porcentaje_segmento = round(
+      100 * clientes / sum(clientes), 2
+    )
+  ) |>
+  dplyr::ungroup()
+
+# 5. Distribución de recencia por segmento
+recencia_por_segmento <- matriz_temporal |>
+  dplyr::count(
+    segmento,
+    banda_recencia,
+    name = "clientes",
+    .drop = FALSE
+  ) |>
+  dplyr::group_by(segmento) |>
+  dplyr::mutate(
+    porcentaje_segmento = round(
+      100 * clientes / sum(clientes), 2
+    )
+  ) |>
+  dplyr::ungroup()
+
+# 6. Resumen para comparar los segmentos
+resumen_temporal <- matriz_temporal |>
+  dplyr::group_by(segmento) |>
+  dplyr::summarise(
+    clientes = dplyr::n(),
+
+    mediana_dias_desde_primera = median(
+      dias_observacion_desde_primera
+    ),
+
+    mediana_recencia_dias = median(
+      recencia_dias_control
+    ),
+
+    clientes_hasta_30_dias_desde_primera = sum(
+      dias_observacion_desde_primera <= 30
+    ),
+
+    porcentaje_hasta_30_dias_desde_primera = round(
+      100 * mean(dias_observacion_desde_primera <= 30), 2
+    ),
+
+    clientes_hasta_90_dias_desde_primera = sum(
+      dias_observacion_desde_primera <= 90
+    ),
+
+    porcentaje_hasta_90_dias_desde_primera = round(
+      100 * mean(dias_observacion_desde_primera <= 90), 2
+    ),
+
+    clientes_recencia_mayor_180_dias = sum(
+      recencia_dias_control > 180
+    ),
+
+    porcentaje_recencia_mayor_180_dias = round(
+      100 * mean(recencia_dias_control > 180), 2
+    ),
+
+    .groups = "drop"
+  )
+
+# 7. Control de totales
+stopifnot(
+  sum(tiempo_por_segmento$clientes) ==
+    nrow(matriz_clientes),
+
+  sum(recencia_por_segmento$clientes) ==
+    nrow(matriz_clientes)
+)
+
+cat("\nRESUMEN TEMPORAL POR SEGMENTO\n")
+print(as.data.frame(resumen_temporal), row.names = FALSE)
+
+cat("\nTIEMPO DISPONIBLE DESDE LA PRIMERA COMPRA DEL PERIODO\n")
+print(as.data.frame(tiempo_por_segmento), row.names = FALSE)
+
+cat("\nRECENCIA DE LA ULTIMA COMPRA DEL PERIODO\n")
+print(as.data.frame(recencia_por_segmento), row.names = FALSE)
+
+# 8. Guardar resultados locales
+dir.create(
+  "data/processed",
+  recursive = TRUE,
+  showWarnings = FALSE
+)
+
+saveRDS(
+  matriz_temporal,
+  "data/processed/matriz_temporal.rds"
+)
+
+saveRDS(
+  resumen_temporal,
+  "data/processed/resumen_temporal.rds"
+)
+
+saveRDS(
+  tiempo_por_segmento,
+  "data/processed/tiempo_por_segmento.rds"
+)
+
+saveRDS(
+  recencia_por_segmento,
+  "data/processed/recencia_por_segmento.rds"
+)
+```
+```{r publicos-propuesta-fidelizacion}
+stopifnot(exists("matriz_temporal"))
+
+publicos_fidelizacion <- matriz_temporal |>
+  dplyr::group_by(segmento, banda_recencia) |>
+  dplyr::summarise(
+    compradores = dplyr::n(),
+
+    compradores_en_maestro = sum(
+      cliente_en_maestro
+    ),
+
+    gasto_neto_12m = sum(gasto_neto),
+
+    gasto_neto_12m_en_maestro = sum(
+      gasto_neto[cliente_en_maestro]
+    ),
+
+    .groups = "drop"
+  ) |>
+  dplyr::group_by(segmento) |>
+  dplyr::mutate(
+    porcentaje_del_segmento = round(
+      100 * compradores / sum(compradores), 2
+    )
+  ) |>
+  dplyr::ungroup() |>
+  dplyr::mutate(
+    referencia_recompensas_intermedio =
+      gasto_neto_12m * 0.40 * 0.15,
+
+    referencia_recompensas_en_maestro =
+      gasto_neto_12m_en_maestro * 0.40 * 0.15,
+
+    referencia_media_por_comprador =
+      referencia_recompensas_intermedio / compradores
+  )
+
+stopifnot(
+  sum(publicos_fidelizacion$compradores) ==
+    nrow(matriz_temporal),
+
+  isTRUE(
+    all.equal(
+      sum(publicos_fidelizacion$gasto_neto_12m),
+      sum(matriz_temporal$gasto_neto),
+      tolerance = 1e-8
+    )
+  )
+)
+
+cat("\nPUBLICOS POR SEGMENTO Y RECENCIA\n")
+print(
+  as.data.frame(
+    publicos_fidelizacion |>
+      dplyr::mutate(
+        dplyr::across(
+          where(is.numeric),
+          ~ round(.x, 2)
+        )
+      )
+  ),
+  row.names = FALSE
+)
+
+saveRDS(
+  publicos_fidelizacion,
+  "data/processed/publicos_fidelizacion.rds"
+)
+```
