@@ -61,17 +61,4 @@ chunk de importación.
 El documento debe importar los archivos por sí mismo, sin depender
 de tablas cargadas manualmente en el Environment.
 
-## Precauciones y limitaciones
 
-- No subir contraseñas ni tokens de GitHub.
-- No subir maestros ni tablas con registros individuales.
-- Las operaciones negativas no se interpretan automáticamente
-  como devoluciones.
-- Las cantidades extremas quedan pendientes de validación.
-- El escenario de UPT con filtro de 1 a 100 artículos es provisional.
-- No se pueden atribuir causalmente los cambios observados al programa
-  de fidelización.
-- Los escenarios económicos dependen de supuestos, no de márgenes
-  reales facilitados por la empresa.
-- Las acciones de fidelización son propuestas que deben evaluarse,
-  no resultados ya demostrados.
