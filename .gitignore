@@ -4,7 +4,9 @@
 .Ruserdata
 
 # Datos y resultados locales
-/data/
+/data/*
+!/data/Maestro de Clientes.xlsx
+!/data/Maestro Tiquets Cliente.xlsx
 /output/
 
 # Credenciales
