@@ -1955,7 +1955,7 @@ canales_clientes <- matriz_clientes |>
   dplyr::mutate(
     canal_captacion = dplyr::case_when(
       !cliente_en_maestro ~ "Fuera del maestro",
-      is.na(Tienda_CaptacionCRM) ~ "Captación sin dato",
+      is.na(Tienda_CaptacionCRM) ~ "Canal de captación desconocido",
       Tienda_CaptacionCRM == "Tienda online" ~ "Captación online",
       TRUE ~ "Captación física"
     ),
@@ -2018,6 +2018,8 @@ comportamiento_por_captacion <- canales_clientes |>
 # 8. Comportamiento según canal de compra
 # Quien usa los dos canales tiene al menos dos compras por definición.
 # Se compara también solo entre compradores con dos o más compras.
+# Los que compran más veces tienen más oportunidades de usar ambos canales, 
+# por lo que la diferencia se interpreta como asociación, no efecto.
 comportamiento_por_canal_compra <- dplyr::bind_rows(
   canales_clientes |>
     dplyr::group_by(canal_compra) |>
@@ -2034,7 +2036,7 @@ comportamiento_por_canal_compra <- dplyr::bind_rows(
 activacion_por_captacion <- clientes_base |>
   dplyr::mutate(
     canal_captacion = dplyr::case_when(
-      is.na(Tienda_CaptacionCRM) ~ "Captación sin dato",
+      is.na(Tienda_CaptacionCRM) ~ "Canal de captación desconocido",
       Tienda_CaptacionCRM == "Tienda online" ~ "Captación online",
       TRUE ~ "Captación física"
     ),
@@ -2063,7 +2065,6 @@ tique_por_canal <- tiques_base |>
   dplyr::group_by(canal) |>
   dplyr::summarise(
     tiques_positivos = dplyr::n(),
-    porcentaje_tiques = NA_real_,
     gasto_positivo = sum(Importe_tiquet),
     ticket_medio_positivo = mean(Importe_tiquet),
     upt_escenario_1_a_100 = mean(
@@ -2140,7 +2141,7 @@ fecha_corte <- as.Date("2023-05-31")
 # Los tramos se alinean con las ventanas de 12 meses del informe.
 asignar_tramo_antiguedad <- function(fecha) {
   tramo <- dplyr::case_when(
-    is.na(fecha) ~ "Sin fecha de captación",
+    is.na(fecha) ~ "Fecha de captación desconocida",
     fecha >= as.Date("2022-06-01") ~ "1. Menos de 12 meses",
     fecha >= as.Date("2021-06-01") ~ "2. De 12 a 24 meses",
     fecha >= as.Date("2020-06-01") ~ "3. De 24 a 36 meses",
@@ -2153,7 +2154,7 @@ asignar_tramo_antiguedad <- function(fecha) {
     "3. De 24 a 36 meses",
     "4. Lanzamiento (ene-may 2020)",
     "5. Antes de 2020",
-    "Sin fecha de captación"
+    "Fecha de captación desconocida"
   ))
 }
 
@@ -2219,7 +2220,44 @@ segmentos_por_antiguedad <- antiguedad_activos |>
   dplyr::mutate(porcentaje_segmento = 100 * clientes / sum(clientes)) |>
   dplyr::ungroup()
 
-# 4. Vista B: cohortes con el mismo tiempo para comprar.
+# 4. Canal de captación dentro de cada tramo de antigüedad.
+# Entre los activos antiguos hay más captados online, y los antiguos
+# compran más: comparar los canales en el total mezcla canal y antigüedad.
+# Se comparan los canales dentro de cada tramo.
+canal_por_antiguedad <- antiguedad_activos |>
+  dplyr::filter(
+    cliente_en_maestro,
+    canal_captacion %in% c("Captación física", "Captación online"),
+    tramo_antiguedad != "Fecha de captación desconocida"
+  ) |>
+  dplyr::group_by(tramo_antiguedad, canal_captacion) |>
+  resumir_comportamiento() |>
+  dplyr::left_join(
+    clientes_base |>
+      dplyr::filter(!is.na(Tienda_CaptacionCRM)) |>
+      dplyr::mutate(
+        tramo_antiguedad = asignar_tramo_antiguedad(Fecha_CaptacionCRM),
+        canal_captacion = dplyr::if_else(
+          Tienda_CaptacionCRM == "Tienda online",
+          "Captación online",
+          "Captación física"
+        )
+      ) |>
+      dplyr::count(
+        tramo_antiguedad, canal_captacion,
+        name = "registros_maestro"
+      ),
+    by = c("tramo_antiguedad", "canal_captacion")
+  ) |>
+  dplyr::group_by(tramo_antiguedad) |>
+  dplyr::mutate(
+    porcentaje_activos_tramo = 100 * clientes / sum(clientes),
+    porcentaje_registros_activos =
+      100 * clientes / registros_maestro
+  ) |>
+  dplyr::ungroup()
+
+# 5. Vista B: cohortes con el mismo tiempo para comprar.
 # Captados desde ene-2021 (inicio del histórico de tiques) y con 180 días
 # completos antes del corte. Se cuentan las compras positivas desde el día
 # de captación hasta el día 179.
@@ -2236,7 +2274,7 @@ cohortes_base <- clientes_base |>
       Tienda_CaptacionCRM == "Tienda online",
       "Captación online",
       "Captación física",
-      missing = "Captación sin dato"
+      missing = "Canal de captación desconocido"
     ),
     cohorte = paste0(
       format(Fecha_CaptacionCRM, "%Y"),
@@ -2301,20 +2339,106 @@ resumen_cohortes <- dplyr::bind_rows(
     resumir_cohorte() |>
     dplyr::mutate(canal_captacion = "Total"),
   cohortes_clientes |>
-    dplyr::filter(canal_captacion != "Captación sin dato") |>
+    dplyr::filter(canal_captacion != "Canal de captación desconocido") |>
     dplyr::group_by(cohorte, canal_captacion) |>
     resumir_cohorte()
 ) |>
   dplyr::arrange(cohorte, canal_captacion)
 
 resumen_cohortes_canal <- cohortes_clientes |>
-  dplyr::filter(canal_captacion != "Captación sin dato") |>
+  dplyr::filter(canal_captacion != "Canal de captación desconocido") |>
   dplyr::group_by(canal_captacion) |>
   resumir_cohorte()
 
-# 5. Controles
+# 6. Revisión del cohorte del 1.er semestre de 2022.
+# Su porcentaje de compra en 180 días es más bajo que el del resto.
+# Se revisa mes a mes y por canal: número de altas (para ver si hubo
+# un pico, como en una campaña puntual) y registros que no tienen
+# ninguna compra positiva en todo el histórico.
+ids_con_compra_historico <- tiques_base |>
+  dplyr::filter(!is.na(Id_cliente), Importe_tiquet > 0) |>
+  dplyr::distinct(Id_cliente) |>
+  dplyr::pull(Id_cliente)
+
+cohortes_revision <- cohortes_clientes |>
+  dplyr::filter(canal_captacion != "Canal de captación desconocido") |>
+  dplyr::mutate(
+    mes_captacion = format(Fecha_CaptacionCRM, "%Y-%m"),
+    sin_compra_historico =
+      !(Id_cliente %in% ids_con_compra_historico)
+  )
+
+cohortes_mensuales <- cohortes_revision |>
+  dplyr::group_by(mes_captacion, canal_captacion) |>
+  resumir_cohorte() |>
+  dplyr::left_join(
+    cohortes_revision |>
+      dplyr::group_by(mes_captacion, canal_captacion) |>
+      dplyr::summarise(
+        porcentaje_sin_compra_historico =
+          100 * mean(sin_compra_historico),
+        .groups = "drop"
+      ),
+    by = c("mes_captacion", "canal_captacion")
+  ) |>
+  dplyr::arrange(canal_captacion, mes_captacion)
+
+# Periodo identificado en la tabla mensual: altas en tienda física de
+# febrero a junio de 2022 (agosto de 2022 también sale bajo).
+inicio_revision <- as.Date("2022-02-01")
+fin_revision    <- as.Date("2022-06-30")
+
+comparacion_periodo_revision <- cohortes_revision |>
+  dplyr::mutate(
+    periodo = dplyr::if_else(
+      Fecha_CaptacionCRM >= inicio_revision &
+        Fecha_CaptacionCRM <= fin_revision,
+      "Altas feb-jun 2022",
+      "Resto de altas 2021-2022"
+    )
+  ) |>
+  dplyr::group_by(canal_captacion, periodo) |>
+  resumir_cohorte() |>
+  dplyr::left_join(
+    cohortes_revision |>
+      dplyr::mutate(
+        periodo = dplyr::if_else(
+          Fecha_CaptacionCRM >= inicio_revision &
+            Fecha_CaptacionCRM <= fin_revision,
+          "Altas feb-jun 2022",
+          "Resto de altas 2021-2022"
+        )
+      ) |>
+      dplyr::group_by(canal_captacion, periodo) |>
+      dplyr::summarise(
+        porcentaje_sin_compra_historico =
+          100 * mean(sin_compra_historico),
+        .groups = "drop"
+      ),
+    by = c("canal_captacion", "periodo")
+  )
+
+# Altas diarias del periodo: un pico indicaría una campaña puntual
+altas_diarias_revision <- cohortes_revision |>
+  dplyr::filter(
+    Fecha_CaptacionCRM >= inicio_revision,
+    Fecha_CaptacionCRM <= fin_revision
+  ) |>
+  dplyr::count(Fecha_CaptacionCRM, name = "altas")
+
+# 7. Controles
 stopifnot(
   !anyDuplicated(cohortes_clientes$Id_cliente),
+  sum(cohortes_mensuales$registros) == nrow(cohortes_revision),
+  sum(comparacion_periodo_revision$registros) ==
+    nrow(cohortes_revision),
+  sum(canal_por_antiguedad$clientes) ==
+    sum(
+      antiguedad_activos$cliente_en_maestro &
+        antiguedad_activos$canal_captacion %in%
+          c("Captación física", "Captación online") &
+        antiguedad_activos$tramo_antiguedad != "Fecha de captación desconocida"
+    ),
   sum(resumen_antiguedad_activos$clientes) ==
     sum(matriz_clientes$cliente_en_maestro),
   sum(segmentos_por_antiguedad$clientes) ==
@@ -2322,12 +2446,15 @@ stopifnot(
   all(cohortes_clientes$compras_ventana >= 0)
 )
 
-# 6. Mostrar resultados
+# 8. Mostrar resultados
 cat("\nVISTA A: ACTIVOS DE 12 MESES POR ANTIGÜEDAD (PRESENTES EN MAESTRO)\n")
 print(redondear(resumen_antiguedad_activos), row.names = FALSE)
 
 cat("\nSEGMENTOS A-D POR ANTIGÜEDAD\n")
 print(redondear(segmentos_por_antiguedad), row.names = FALSE)
+
+cat("\nCANAL DE CAPTACIÓN DENTRO DE CADA TRAMO DE ANTIGÜEDAD\n")
+print(redondear(canal_por_antiguedad), row.names = FALSE)
 
 cat("\nVISTA B: COHORTES DE CAPTACIÓN, PRIMEROS 180 DÍAS\n")
 print(redondear(resumen_cohortes), row.names = FALSE)
@@ -2335,15 +2462,27 @@ print(redondear(resumen_cohortes), row.names = FALSE)
 cat("\nVISTA B: TOTAL DE COHORTES POR CANAL DE CAPTACIÓN\n")
 print(redondear(resumen_cohortes_canal), row.names = FALSE)
 
-# 7. Guardar resultados locales
+cat("\nREVISIÓN: COHORTES MENSUALES POR CANAL, PRIMEROS 180 DÍAS\n")
+print(redondear(cohortes_mensuales), row.names = FALSE)
+
+cat("\nREVISIÓN: ALTAS FEB-JUN 2022 FRENTE AL RESTO\n")
+print(redondear(comparacion_periodo_revision), row.names = FALSE)
+
+cat("\nREVISIÓN: ALTAS DIARIAS FEB-JUN 2022\n")
+print(summary(altas_diarias_revision$altas))
+
+# 9. Guardar resultados locales
 saveRDS(antiguedad_activos, "data/processed/antiguedad_activos.rds")
 saveRDS(cohortes_clientes, "data/processed/cohortes_clientes.rds")
 saveRDS(
   list(
     resumen_antiguedad_activos = resumen_antiguedad_activos,
     segmentos_por_antiguedad = segmentos_por_antiguedad,
+    canal_por_antiguedad = canal_por_antiguedad,
     resumen_cohortes = resumen_cohortes,
-    resumen_cohortes_canal = resumen_cohortes_canal
+    resumen_cohortes_canal = resumen_cohortes_canal,
+    cohortes_mensuales = cohortes_mensuales,
+    comparacion_periodo_revision = comparacion_periodo_revision
   ),
   "data/processed/resumen_antiguedad.rds"
 )
